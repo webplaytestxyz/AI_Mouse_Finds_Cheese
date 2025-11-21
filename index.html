@@ -1,0 +1,564 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>AI Mouse Finds Cheese — Reinforcement Learning Example (Q-Learning)</title>
+<style>
+  body { font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:#f6f7f8; color:#111;
+         display:flex; gap:18px; padding:18px; align-items:flex-start; }
+  #panel { width:300px; background:white; border-radius:10px; padding:14px; box-shadow:0 6px 18px rgba(20,20,30,0.08); }
+  h2{ margin:6px 0 12px 0; font-size:16px; }
+  button{ padding:8px 12px; border-radius:8px; border:1px solid #ddd; background:#fff; cursor:pointer; }
+  label{ display:block; margin-top:8px; font-size:13px; color:#444; }
+  #canvasWrap{ flex:1; display:flex; align-items:center; justify-content:center; }
+  canvas{ background:#fff; border-radius:8px; box-shadow:0 6px 18px rgba(10,10,20,0.06); }
+  .small { font-size:12px; color:#666; margin-top:6px; }
+  .stat { font-family: monospace; font-size:13px; background:#f1f4f6; padding:6px 8px; border-radius:6px; display:inline-block; margin-top:6px; }
+</style>
+</head>
+<body>
+
+<div id="panel">
+  <h2>AI Mouse Finds Cheese — Reinforcement Learning Example (Q-Learning)</h2>
+
+  <div style="display:flex;gap:8px;">
+    <button id="startBtn">Start</button>
+    <button id="pauseBtn">Pause</button>
+    <button id="resetQBtn">Reset Q</button>
+  </div>
+
+  <label>Episodes per second: <span id="epsVal">6</span></label>
+  <input id="epsRange" type="range" min="1" max="60" value="6" />
+
+  <label>Max steps / episode: <span id="maxStepsVal">500</span></label>
+  <input id="maxStepsRange" type="range" min="50" max="2000" step="10" value="500" />
+
+  <label>Exploration (ε): <span id="epsLabel">0.6</span></label>
+  <input id="epsilonRange" type="range" min="0" max="100" value="60" />
+
+
+
+  <div style="margin-top:12px;">
+    <div class="small">Episode: <span id="episode">0</span></div>
+    <div class="small">Best steps (shortest found): <span id="bestSteps">—</span></div>
+    <div class="small">Collisions (this run): <span id="collisions">0</span></div>
+    <div class="small">Current reward (this episode): <span id="curReward">0</span></div>
+    <div class="small">Confidence Level: <span id="confidence">0% 🙂</span></div>
+  </div>
+
+  <div style="margin-top:12px;">
+    <div class="small">Controls: <span class="stat">Start</span> runs episodes continuously. <span class="stat">Pause</span> stops. <span class="stat">Reset Q</span> clears learned policy.</div>
+  </div>
+</div>
+
+<div id="canvasWrap">
+  <canvas id="c" width="920" height="680"></canvas>
+</div>
+
+<script>
+/* =========================
+   CONFIG
+   ========================= */
+const TILE = 28;                // grid tile size in pixels (visual scale)
+const GRID_W = 28;              // number of tiles horizontally
+const GRID_H = 22;              // number of tiles vertically
+const WALL = 1;
+const EMPTY = 0;
+const GOAL_TILE = 2;
+const START_TILE = 3;
+
+const ACTIONS = [
+  {name:'UP', dx:0, dy:-1},
+  {name:'RIGHT', dx:1, dy:0},
+  {name:'DOWN', dx:0, dy:1},
+  {name:'LEFT', dx:-1, dy:0}
+];
+
+/* Q-Learning hyperparams (editable via sliders) */
+let alpha = 0.6;   // learning rate
+let gamma = 0.98;  // discount factor
+let epsilon = 0.6; // exploration
+let episodesPerSecond = 6;
+let maxStepsPerEpisode = 500;
+
+/* Reward scheme */
+const REWARD_GOAL = 1.0;
+const REWARD_COLLISION = -0.25;
+const REWARD_STEP = -0.005;
+
+/* Canvas / rendering */
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+canvas.width = GRID_W * TILE + 48;
+canvas.height = GRID_H * TILE + 48;
+const offsetX = 24, offsetY = 24;
+
+/* UI elements */
+const startBtn = document.getElementById('startBtn');
+const pauseBtn = document.getElementById('pauseBtn');
+const resetQBtn = document.getElementById('resetQBtn');
+const episodeEl = document.getElementById('episode');
+const bestStepsEl = document.getElementById('bestSteps');
+const collisionsEl = document.getElementById('collisions');
+const curRewardEl = document.getElementById('curReward');
+const epsRange = document.getElementById('epsRange');
+const epsVal = document.getElementById('epsVal');
+const maxStepsRange = document.getElementById('maxStepsRange');
+const maxStepsVal = document.getElementById('maxStepsVal');
+const epsilonRange = document.getElementById('epsilonRange');
+const epsLabel = document.getElementById('epsLabel');
+
+let successCount = 0;
+let totalEpisodes = 0;
+const confidenceEl = document.getElementById('confidence');
+
+/* =========================
+   MAZE GENERATION (recursive backtracker)
+   ========================= */
+function makeEmptyGrid(w,h){
+  const g = Array(h).fill(0).map(()=>Array(w).fill(WALL));
+  return g;
+}
+
+/* carve maze (grid of cells where every other tile is cell) */
+function generateMaze(w,h){
+  // we use odd dimensions internally for passage generation
+  const grid = makeEmptyGrid(w,h);
+  const stack = [];
+  const visited = Array(h).fill(0).map(()=>Array(w).fill(false));
+
+  // start on odd coords
+  function neighbors(cx,cy){
+    const n = [];
+    const dirs = [[2,0],[-2,0],[0,2],[0,-2]];
+    for(const [dx,dy] of dirs){
+      const nx=cx+dx, ny=cy+dy;
+      if(nx>0 && nx<w-1 && ny>0 && ny<h-1 && !visited[ny][nx]) n.push([nx,ny]);
+    }
+    return n;
+  }
+
+  // initialize grid with walls; we'll carve passages at odd coords
+  for(let y=1;y<h-1;y++){
+    for(let x=1;x<w-1;x++){
+      if(x%2===1 && y%2===1) grid[y][x]=EMPTY;
+    }
+  }
+
+  // pick start cell
+  let sx=1, sy=1;
+  visited[sy][sx]=true;
+  stack.push([sx,sy]);
+
+  while(stack.length){
+    let [cx,cy] = stack[stack.length-1];
+    let nbs = neighbors(cx,cy);
+    if(nbs.length===0){
+      stack.pop();
+      continue;
+    }
+    let [nx,ny] = nbs[Math.floor(Math.random()*nbs.length)];
+    // remove wall between
+    grid[(cy+ny)/2][(cx+nx)/2] = EMPTY;
+    visited[ny][nx]=true;
+    stack.push([nx,ny]);
+  }
+
+  // add outer walls
+  for(let y=0;y<h;y++){
+    grid[y][0]=WALL; grid[y][w-1]=WALL;
+  }
+  for(let x=0;x<w;x++){
+    grid[0][x]=WALL; grid[h-1][x]=WALL;
+  }
+
+  return grid;
+}
+
+/* Create a grid sized for tiles (we'll use GRID_W, GRID_H directly) */
+let grid = generateMaze(GRID_W, GRID_H);
+
+/* Place start & goal on open tiles */
+function pickOpenTile() {
+  let tries=0;
+  while(tries<2000){
+    tries++;
+    const x = Math.floor(Math.random()*(GRID_W-2))+1;
+    const y = Math.floor(Math.random()*(GRID_H-2))+1;
+    if(grid[y][x]===EMPTY) return [x,y];
+  }
+  return [1,1];
+}
+
+let startPos = pickOpenTile();
+let goalPos = pickOpenTile();
+while(goalPos[0]===startPos[0] && goalPos[1]===startPos[1]) goalPos = pickOpenTile();
+grid[goalPos[1]][goalPos[0]] = GOAL_TILE;
+
+/* =========================
+   Q-TABLE
+   ========================= */
+const qTable = {}; // key: "x,y" -> array of 4 values
+
+function qKey(x,y){ return `${x},${y}`; }
+function ensureQ(pos){
+  const k=qKey(pos[0],pos[1]);
+  if(!qTable[k]) qTable[k]=[0,0,0,0];
+  return qTable[k];
+}
+function resetQ(){ for(const k in qTable) delete qTable[k]; }
+
+/* =========================
+   AGENT STATE
+   ========================= */
+let episode = 0;
+let running = false;
+let paused = false;
+let bestSteps = Infinity;
+let collisionsThisRun = 0;
+let curReward = 0;
+
+/* agent animation / smooth movement */
+const agent = {
+  x: startPos[0],
+  y: startPos[1],
+  px: startPos[0], // pixel position in tile coords (float)
+  py: startPos[1],
+  t:0, // interpolation param
+  moving: false,
+  target: null
+};
+
+function resetAgentToStart(){
+  agent.x = startPos[0];
+  agent.y = startPos[1];
+  agent.px = agent.x;  // ensure px/py initialized
+  agent.py = agent.y;
+  agent.t = 0;
+  agent.moving = false;
+  agent.target = null;
+}
+
+/* =========================
+   Q-LEARNING STEP
+   ========================= */
+function chooseAction(pos){
+  const [x,y]=pos;
+  ensureQ(pos);
+  if(Math.random() < epsilon){
+    // explore
+    return Math.floor(Math.random()*ACTIONS.length);
+  } else {
+    // exploit - choose argmax (break ties randomly)
+    const q = qTable[qKey(x,y)];
+    let best = -Infinity;
+    let bestIdx = 0;
+    let ties = [];
+    for(let i=0;i<q.length;i++){
+      if(q[i] > best){ best = q[i]; ties=[i]; }
+      else if(q[i] === best) ties.push(i);
+    }
+    return ties[Math.floor(Math.random()*ties.length)];
+  }
+}
+
+function stepEnvironment(pos, actionIndex){
+  const act = ACTIONS[actionIndex];
+  const nx = pos[0] + act.dx;
+  const ny = pos[1] + act.dy;
+  // out of bounds or wall -> collision
+  if(nx<0||ny<0||nx>=GRID_W||ny>=GRID_H || grid[ny][nx]===WALL){
+    return { nextPos: [pos[0], pos[1]], reward: REWARD_COLLISION, collided: true, done:false };
+  }
+  // moved to goal?
+  if(grid[ny][nx] === GOAL_TILE){
+    return { nextPos: [nx, ny], reward: REWARD_GOAL, collided:false, done:true };
+  }
+  // normal move
+  return { nextPos: [nx, ny], reward: REWARD_STEP, collided:false, done:false };
+}
+
+function qLearnUpdate(pos, actionIndex, reward, nextPos){
+  ensureQ(pos); ensureQ(nextPos);
+  const key = qKey(pos[0],pos[1]);
+  const nextKey = qKey(nextPos[0],nextPos[1]);
+  const qcur = qTable[key][actionIndex];
+  const qnextMax = Math.max(...qTable[nextKey]);
+  // Q <- Q + alpha * (r + gamma * maxQ(next) - Q)
+  qTable[key][actionIndex] = qcur + alpha * (reward + gamma * qnextMax - qcur);
+}
+
+/* =========================
+   EPISODE RUNNER
+   ========================= */
+async function runEpisodes(){
+  if(running) return;
+  running = true;
+  paused = false;
+  startBtn.disabled = true;
+
+  const intervalMs = 1000 / episodesPerSecond;
+
+  while(running && !paused){
+    episode++;
+    episodeEl.textContent = episode;
+    resetAgentToStart();
+    collisionsThisRun = 0;
+    curReward = 0;
+    let steps=0;
+    let done=false;
+
+    while(steps < maxStepsPerEpisode && !done && !paused){
+      steps++;
+      const state = [agent.x, agent.y];
+      const actionIdx = chooseAction(state);
+      const result = stepEnvironment(state, actionIdx);
+
+      qLearnUpdate(state, actionIdx, result.reward, result.nextPos);
+
+      curReward += result.reward;
+      if(result.collided) collisionsThisRun++;
+      collisionsEl.textContent = collisionsThisRun;
+      curRewardEl.textContent = curReward.toFixed(3);
+
+      if(result.nextPos[0] !== agent.x || result.nextPos[1] !== agent.y){
+        agent.target = {x: result.nextPos[0], y: result.nextPos[1]};
+        agent.moving = true;
+        agent.x = result.nextPos[0];
+        agent.y = result.nextPos[1];
+      }
+
+      if(result.done){
+        done = true;
+        if(steps < bestSteps) bestSteps = steps;
+        bestStepsEl.textContent = (bestSteps===Infinity ? '—' : String(bestSteps));
+      }
+
+      await new Promise(requestAnimationFrame);
+      await new Promise(res => setTimeout(res, 0));
+    } // end steps loop
+
+    // --- Episode finished: update cumulative confidence ---
+    totalEpisodes++;
+    // increment success only if agent reached the goal
+    if(agent.x === goalPos[0] && agent.y === goalPos[1]) successCount++;
+
+    const confidence = Math.round((successCount / totalEpisodes) * 100);
+    let smile = '😟';
+    if(confidence > 90) smile = '🤩';
+    else if(confidence > 75) smile = '😊';
+    else if(confidence > 50) smile = '😐';
+    else if(confidence > 25) smile = '😟';
+    confidenceEl.textContent = `${confidence}% ${smile}`;
+
+    await new Promise(res => setTimeout(res, 10));
+
+    if(paused) break;
+  } // end episodes loop
+
+  running = false;
+  startBtn.disabled = false;
+}
+
+/* =========================
+   RENDERING (CAD-like)
+   ========================= */
+function draw() {
+  // clear
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.save();
+  ctx.translate(offsetX, offsetY);
+
+  // ----- background CAD grid -----
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#e9edf0';
+  for (let x = 0; x <= GRID_W; x++) {
+    ctx.beginPath();
+    ctx.moveTo(x * TILE + 0.5, 0.5);
+    ctx.lineTo(x * TILE + 0.5, GRID_H * TILE + 0.5);
+    ctx.stroke();
+  }
+  for (let y = 0; y <= GRID_H; y++) {
+    ctx.beginPath();
+    ctx.moveTo(0.5, y * TILE + 0.5);
+    ctx.lineTo(GRID_W * TILE + 0.5, y * TILE + 0.5);
+    ctx.stroke();
+  }
+
+  // ----- walls as CAD pads -----
+  ctx.lineWidth = 6;
+  ctx.lineCap = 'butt';
+  ctx.strokeStyle = '#222';
+  for (let y = 0; y < GRID_H; y++) {
+    for (let x = 0; x < GRID_W; x++) {
+      if (grid[y][x] === WALL) {
+        const px = x * TILE, py = y * TILE;
+        ctx.fillStyle = '#222';
+        ctx.fillRect(px - TILE * 0.45 + 0.5, py - TILE * 0.45 + 0.5, TILE * 0.9, TILE * 0.9);
+      }
+    }
+  }
+
+  // ----- goal (cheese) -----
+  const gx = goalPos[0] * TILE, gy = goalPos[1] * TILE;
+  ctx.fillStyle = '#000'; // reset fillStyle fully opaque
+  ctx.font = `${TILE}px serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('🧀', gx + 0.5, gy + 0.5);
+
+  // ----- start pad -----
+  const sx = startPos[0] * TILE, sy = startPos[1] * TILE;
+  ctx.beginPath();
+  ctx.fillStyle = '#f39c12';
+  ctx.strokeStyle = '#b36c00';
+  ctx.lineWidth = 2;
+  ctx.arc(sx + 0.5, sy + 0.5, TILE * 0.28, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  // ----- Q-value heat overlay -----
+  for (let y = 0; y < GRID_H; y++) {
+    for (let x = 0; x < GRID_W; x++) {
+      if (grid[y][x] === EMPTY) {
+        const k = qKey(x, y);
+        if (qTable[k]) {
+          const val = Math.max(...qTable[k]);
+          const alphaVal = Math.min(Math.max((val + 0.5) / 1.5, 0), 1);
+          if (alphaVal > 0.08) {
+            ctx.fillStyle = `rgba(30,144,255,${alphaVal * 0.28})`;
+            ctx.fillRect(x * TILE - TILE * 0.45 + 0.5, y * TILE - TILE * 0.45 + 0.5, TILE * 0.9, TILE * 0.9);
+          }
+        }
+      }
+    }
+  }
+
+  // ----- best-known path (optional) -----
+  function getGreedyPathFrom(sx, sy, limit = 400) {
+    const path = [[sx, sy]];
+    let cx = sx, cy = sy;
+    for (let i = 0; i < limit; i++) {
+      const k = qKey(cx, cy);
+      if (!qTable[k]) break;
+      const q = qTable[k];
+      let bestIdx = q.indexOf(Math.max(...q));
+      const act = ACTIONS[bestIdx];
+      const nx = cx + act.dx, ny = cy + act.dy;
+      if (nx === cx && ny === cy) break;
+      if (nx < 0 || ny < 0 || nx >= GRID_W || ny >= GRID_H) break;
+      if (grid[ny][nx] === WALL) break;
+      path.push([nx, ny]);
+      cx = nx; cy = ny;
+      if (grid[cy][cx] === GOAL_TILE) break;
+    }
+    return path;
+  }
+
+  const greedyPath = getGreedyPathFrom(agent.x, agent.y, 500);
+  if (greedyPath.length > 1) {
+    ctx.beginPath();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#3b82f6';
+    ctx.setLineDash([6, 4]);
+    for (let i = 0; i < greedyPath.length; i++) {
+      const [pxi, pyi] = greedyPath[i];
+      const cx = pxi * TILE, cy = pyi * TILE;
+      if (i === 0) ctx.moveTo(cx + 0.5, cy + 0.5);
+      else ctx.lineTo(cx + 0.5, cy + 0.5);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // ----- agent smooth movement -----
+  const lerpSpeed = 0.32;
+  if (agent.moving && agent.target) {
+    agent.px += (agent.target.x - agent.px) * lerpSpeed;
+    agent.py += (agent.target.y - agent.py) * lerpSpeed;
+    if (Math.hypot(agent.px - agent.target.x, agent.py - agent.target.y) < 0.01) {
+      agent.px = agent.target.x; agent.py = agent.target.y;
+      agent.moving = false;
+      agent.target = null;
+    }
+  } else {
+    agent.px += (agent.x - agent.px) * lerpSpeed;
+    agent.py += (agent.y - agent.py) * lerpSpeed;
+  }
+
+  const ballX = agent.px * TILE, ballY = agent.py * TILE;
+
+  // ----- agent (mouse) -----
+  ctx.fillStyle = '#000'; // reset fully opaque
+  ctx.font = `${TILE}px serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('🐭', ballX + 0.5, ballY + 0.5);
+
+  // ----- shadow under agent -----
+  ctx.beginPath();
+  ctx.ellipse(ballX + 0.5, ballY + TILE * 0.36 + 0.5, TILE * 0.28, TILE * 0.09, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(10,10,10,0.06)';
+  ctx.fill();
+
+  // ----- goal direction arrow -----
+  const dx = goalPos[0] - agent.px, dy = goalPos[1] - agent.py;
+  ctx.beginPath();
+  ctx.strokeStyle = 'rgba(0,0,0,0.12)';
+  ctx.lineWidth = 1;
+  ctx.moveTo(ballX + 0.5, ballY + 0.5);
+  ctx.lineTo(goalPos[0] * TILE + 0.5, goalPos[1] * TILE + 0.5);
+  ctx.stroke();
+
+  ctx.restore();
+
+  // schedule next frame
+  requestAnimationFrame(draw);
+}
+
+/* =========================
+   UI Hookups
+   ========================= */
+startBtn.addEventListener('click', ()=>{
+  if(!running){
+    // read latest hyperparams from UI
+    episodesPerSecond = Number(epsRange.value);
+    epsVal.textContent = episodesPerSecond;
+    maxStepsPerEpisode = Number(maxStepsRange.value);
+    maxStepsVal.textContent = maxStepsPerEpisode;
+    epsilon = Number(epsilonRange.value) / 100;
+    epsLabel.textContent = epsilon.toFixed(2);
+    running = false;
+    runEpisodes();
+  } else {
+    paused = false;
+  }
+});
+pauseBtn.addEventListener('click', ()=>{ paused = true; running = false; startBtn.disabled = false; });
+resetQBtn.addEventListener('click', ()=>{ resetQ(); bestSteps = Infinity; bestStepsEl.textContent = '—'; });
+
+epsRange.addEventListener('input', ()=>{ epsVal.textContent = epsRange.value; episodesPerSecond = Number(epsRange.value); });
+maxStepsRange.addEventListener('input', ()=>{ maxStepsVal.textContent = maxStepsRange.value; maxStepsPerEpisode = Number(maxStepsRange.value); });
+epsilonRange.addEventListener('input', ()=>{ epsilon = Number(epsilonRange.value) / 100; epsLabel.textContent = epsilon.toFixed(2); });
+
+/* =========================
+   Initialization & start rendering
+   ========================= */
+resetAgentToStart();
+draw();
+
+/* helpful: regenerate maze & reset start/goal when double-click canvas */
+canvas.addEventListener('dblclick', ()=>{
+  grid = generateMaze(GRID_W, GRID_H);
+  startPos = pickOpenTile();
+  goalPos = pickOpenTile();
+  while(goalPos[0]===startPos[0] && goalPos[1]===startPos[1]) goalPos = pickOpenTile();
+  grid[goalPos[1]][goalPos[0]] = GOAL_TILE;
+  resetQ();
+  resetAgentToStart();
+});
+
+</script>
+</body>
+</html>
