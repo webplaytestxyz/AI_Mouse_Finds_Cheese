@@ -1,7 +1,7 @@
 
 <h1>AI Mouse Finds Cheese — Q-Learning Demo</h1>
 
-<p>A polished, single-file browser demo that teaches core reinforcement-learning concepts with an adorable visual: a mouse learns to find cheese in procedurally generated mazes using tabular Q-learning. Ready-to-run, highly hackable, and ideal for demos, teaching, quick experiments, or as a starting point for sim-to-real robotics research.</p>
+<p>A polished, single-file browser demo that teaches core reinforcement-learning concepts with an adorable visual: a mouse learns to find cheese in procedurally generated mazes using tabular <a href="https://en.wikipedia.org/wiki/Q-learning">Q-learning</a>. Ready-to-run, highly hackable, and ideal for demos, teaching, quick experiments, or as a starting point for sim-to-real robotics research.</p>
 
 <h2>Why this repo matters</h2>
 <ul>
